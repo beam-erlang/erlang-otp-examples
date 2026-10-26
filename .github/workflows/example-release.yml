@@ -1,0 +1,86 @@
+name: Build and test 'release' example
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Exact Erlangsters OTP distribution version (including revision)
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  build:
+    name: ${{ matrix.platform.target }} / ${{ matrix.flavor }}
+    runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+        - runner: ubuntu-24.04
+          target: linux-x86_64
+        - runner: macos-15
+          target: macos-arm64
+        - runner: windows-2025
+          target: windows-x86_64
+        flavor:
+        - emu
+        - jit
+    defaults:
+      run:
+        shell: bash
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        persist-credentials: false
+    - name: Select private work directory
+      run: echo "WORK=$RUNNER_TEMP/otp-examples-release" >> "$GITHUB_ENV"
+    - name: Install selected distribution
+      id: otp
+      uses: beam-erlang/setup-erlang-otp@v1
+      with:
+        version: ${{ inputs.version }}
+        flavor: ${{ matrix.flavor }}
+    - name: Prepare verified Rebar3 and private directories
+      env:
+        OTP_PREFIX: ${{ steps.otp.outputs.path }}
+        OTP_VERSION: ${{ steps.otp.outputs.version }}
+      run: |
+        test -x "$OTP_PREFIX/bin/escript"
+        test -n "$OTP_VERSION"
+        mkdir -p "$WORK" "$WORK/config" "$WORK/cache" artifacts
+        printf 'OTP_PREFIX=%s\nOTP_VERSION=%s\nREBAR3=%s/rebar3\nREBAR_CACHE_DIR=%s/cache\nREBAR_GLOBAL_CONFIG_DIR=%s/config\n' "$OTP_PREFIX" "$OTP_VERSION" "$WORK" "$WORK" "$WORK" >> "$GITHUB_ENV"
+        curl --fail --location --retry 3 https://github.com/erlang/rebar3/releases/download/3.27.0/rebar3 -o "$WORK/rebar3"
+        echo "af85aab41f9fd74bdd6341ebdf6fe9c88077aab9f8eac82371583fa02f2b0bdf  $WORK/rebar3" | sha256sum --check
+    - name: Acquire dependencies for release
+      working-directory: examples/release
+      run: |-
+        "$OTP_PREFIX/bin/escript" "$REBAR3" get-deps
+        git diff --exit-code -- rebar.lock
+    - name: Build and test release offline
+      working-directory: examples/release
+      env:
+        REBAR_OFFLINE: '1'
+      run: |-
+        "$OTP_PREFIX/bin/escript" "$REBAR3" compile
+        "$OTP_PREFIX/bin/escript" "$REBAR3" as prod tar
+        git diff --exit-code -- rebar.lock
+    - name: Run packaged release
+      run: python3 examples/release/test/smoke.py examples/release/_build/prod/rel/example_release/example_release-0.1.0.tar.gz --otp
+        "$OTP_PREFIX" --work-root "$WORK/execution"
+    - name: Stage tested artifacts
+      run: |-
+        cp examples/release/_build/prod/rel/example_release/example_release-0.1.0.tar.gz artifacts/
+        cp examples/release/LICENSE.md artifacts/
+    - name: Upload tested artifacts
+      uses: actions/upload-artifact@v7
+      with:
+        name: release-${{ steps.otp.outputs.version }}-${{ matrix.platform.target }}-${{ matrix.flavor }}
+        path: artifacts/
+        if-no-files-found: error
+        retention-days: 14
+    - name: Cleanup disposable outputs
+      if: always()
+      run: |-
+        rm -rf "$WORK" artifacts
+        find . -type d -name _build -prune -exec rm -rf {} +

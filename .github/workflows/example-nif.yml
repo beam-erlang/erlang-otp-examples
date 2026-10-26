@@ -1,0 +1,100 @@
+name: Build and test 'nif' example
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Exact Erlangsters OTP distribution version (including revision)
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  build:
+    name: ${{ matrix.platform.target }} / ${{ matrix.flavor }}
+    runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+        - runner: ubuntu-24.04
+          target: linux-x86_64
+        - runner: macos-15
+          target: macos-arm64
+        - runner: windows-2025
+          target: windows-x86_64
+        flavor:
+        - emu
+        - jit
+    defaults:
+      run:
+        shell: bash
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        persist-credentials: false
+    - uses: actions/setup-python@v7
+      with:
+        python-version: '3.12'
+    - name: Select private work directory
+      run: |
+        echo "WORK=$RUNNER_TEMP/otp-examples-nif" >> "$GITHUB_ENV"
+        echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
+    - name: Install selected distribution
+      id: otp
+      uses: beam-erlang/setup-erlang-otp@v1
+      with:
+        version: ${{ inputs.version }}
+        flavor: ${{ matrix.flavor }}
+    - name: Prepare verified Rebar3 and private directories
+      env:
+        OTP_PREFIX: ${{ steps.otp.outputs.path }}
+        OTP_VERSION: ${{ steps.otp.outputs.version }}
+      run: |
+        OTP_PREFIX="${OTP_PREFIX//\\//}"
+        escript="$OTP_PREFIX/bin/escript"
+        if [ "$RUNNER_OS" = Windows ]; then escript="$escript.exe"; fi
+        test -x "$escript"
+        printf 'OTP_ESCRIPT=%s\n' "$escript" >> "$GITHUB_ENV"
+        test -n "$OTP_VERSION"
+        mkdir -p "$WORK" "$WORK/config" "$WORK/cache" artifacts
+        printf 'OTP_PREFIX=%s\nOTP_VERSION=%s\nREBAR3=%s/rebar3\nREBAR_CACHE_DIR=%s/cache\nREBAR_GLOBAL_CONFIG_DIR=%s/config\n' "$OTP_PREFIX" "$OTP_VERSION" "$WORK" "$WORK" "$WORK" >> "$GITHUB_ENV"
+        curl --fail --location --retry 3 https://github.com/erlang/rebar3/releases/download/3.27.0/rebar3 -o "$WORK/rebar3"
+        python -c 'import hashlib, os, pathlib; p = pathlib.Path(os.environ["WORK"]) / "rebar3"; assert hashlib.sha256(p.read_bytes()).hexdigest() == "af85aab41f9fd74bdd6341ebdf6fe9c88077aab9f8eac82371583fa02f2b0bdf", "Rebar3 checksum mismatch"'
+    - name: Check native build tools
+      run: cmake --version
+    - name: Acquire dependencies for nif
+      working-directory: examples/nif
+      run: |-
+        "$OTP_ESCRIPT" "$REBAR3" get-deps
+        git diff --exit-code -- rebar.lock
+    - name: Build and test nif offline
+      working-directory: examples/nif
+      env:
+        REBAR_OFFLINE: '1'
+      run: |-
+        "$OTP_ESCRIPT" "$REBAR3" compile
+        "$OTP_ESCRIPT" "$REBAR3" eunit
+        git diff --exit-code -- rebar.lock
+    - name: Package native application
+      run: |
+        tar -chzf "$WORK/nif.tar.gz" -C examples/nif/_build/default/lib/example_nif ebin priv
+    - name: Run packaged native application
+      run: python examples/nif/test/smoke.py "$OTP_PREFIX" "$WORK/nif.tar.gz"
+    - name: Stage tested artifacts
+      run: |
+        cp "$WORK/nif.tar.gz" artifacts/
+        cp examples/nif/LICENSE.md artifacts/
+    - name: Upload tested artifacts
+      uses: actions/upload-artifact@v7
+      with:
+        name: nif-${{ steps.otp.outputs.version }}-${{ matrix.platform.target }}-${{ matrix.flavor }}
+        path: artifacts/
+        if-no-files-found: error
+        retention-days: 14
+    - name: Cleanup disposable outputs
+      if: always()
+      run: |-
+        rm -f examples/nif/priv/example_nif.so examples/nif/priv/example_nif.dll
+        rm -rf "$WORK" artifacts
+        find . -type d -name _build -prune -exec rm -rf {} +

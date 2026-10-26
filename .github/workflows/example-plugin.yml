@@ -1,0 +1,93 @@
+name: Build and test 'plugin' example
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Exact Erlangsters OTP distribution version (including revision)
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  build:
+    name: ${{ matrix.platform.target }} / ${{ matrix.flavor }}
+    runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+        - runner: ubuntu-24.04
+          target: linux-x86_64
+        - runner: macos-15
+          target: macos-arm64
+        - runner: windows-2025
+          target: windows-x86_64
+        flavor:
+        - emu
+        - jit
+    defaults:
+      run:
+        shell: bash
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        persist-credentials: false
+    - uses: actions/setup-python@v7
+      with:
+        python-version: '3.12'
+    - name: Select private work directory
+      run: |
+        echo "WORK=$RUNNER_TEMP/otp-examples-plugin" >> "$GITHUB_ENV"
+        echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
+    - name: Install selected distribution
+      id: otp
+      uses: beam-erlang/setup-erlang-otp@v1
+      with:
+        version: ${{ inputs.version }}
+        flavor: ${{ matrix.flavor }}
+    - name: Prepare verified Rebar3 and private directories
+      env:
+        OTP_PREFIX: ${{ steps.otp.outputs.path }}
+        OTP_VERSION: ${{ steps.otp.outputs.version }}
+      run: |
+        OTP_PREFIX="${OTP_PREFIX//\\//}"
+        escript="$OTP_PREFIX/bin/escript"
+        if [ "$RUNNER_OS" = Windows ]; then escript="$escript.exe"; fi
+        test -x "$escript"
+        printf 'OTP_ESCRIPT=%s\n' "$escript" >> "$GITHUB_ENV"
+        test -n "$OTP_VERSION"
+        mkdir -p "$WORK" "$WORK/config" "$WORK/cache" artifacts
+        printf 'OTP_PREFIX=%s\nOTP_VERSION=%s\nREBAR3=%s/rebar3\nREBAR_CACHE_DIR=%s/cache\nREBAR_GLOBAL_CONFIG_DIR=%s/config\n' "$OTP_PREFIX" "$OTP_VERSION" "$WORK" "$WORK" "$WORK" >> "$GITHUB_ENV"
+        curl --fail --location --retry 3 https://github.com/erlang/rebar3/releases/download/3.27.0/rebar3 -o "$WORK/rebar3"
+        python -c 'import hashlib, os, pathlib; p = pathlib.Path(os.environ["WORK"]) / "rebar3"; assert hashlib.sha256(p.read_bytes()).hexdigest() == "af85aab41f9fd74bdd6341ebdf6fe9c88077aab9f8eac82371583fa02f2b0bdf", "Rebar3 checksum mismatch"'
+    - name: Acquire dependencies for plugin
+      working-directory: examples/plugin
+      run: |-
+        "$OTP_ESCRIPT" "$REBAR3" get-deps
+        git diff --exit-code -- rebar.lock
+    - name: Build and test plugin offline
+      working-directory: examples/plugin
+      env:
+        REBAR_OFFLINE: '1'
+      run: |-
+        "$OTP_ESCRIPT" "$REBAR3" compile
+        git diff --exit-code -- rebar.lock
+    - name: Run plugin in a copied consumer
+      run: python examples/plugin/test/smoke.py "$OTP_PREFIX" "$REBAR3"
+    - name: Stage tested artifacts
+      run: |-
+        tar -czf artifacts/plugin.tar.gz -C examples/plugin src test rebar.config rebar.lock README.md LICENSE.md
+        cp examples/plugin/LICENSE.md artifacts/
+    - name: Upload tested artifacts
+      uses: actions/upload-artifact@v7
+      with:
+        name: plugin-${{ steps.otp.outputs.version }}-${{ matrix.platform.target }}-${{ matrix.flavor }}
+        path: artifacts/
+        if-no-files-found: error
+        retention-days: 14
+    - name: Cleanup disposable outputs
+      if: always()
+      run: |-
+        rm -rf "$WORK" artifacts
+        find . -type d -name _build -prune -exec rm -rf {} +
