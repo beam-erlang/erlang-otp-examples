@@ -68,6 +68,8 @@ Source and workflow checks are run locally.
 
 ## Validation status
 
+### Historical checks before the `+K` correction
+
 Historical local checks on 2026-10-26 used unpublished OTP 29.0 development
 installations on Linux x86-64. They predate the current layout and smoke-helper
 revisions and do not establish compatibility for a published distribution or
@@ -88,10 +90,11 @@ failed this minimal probe with exit status 1 and
 "$OTP_PREFIX/bin/erl" +K true -noshell -eval 'halt(0).'
 ```
 
-The option remains unchanged in `examples/release/config/vm.args`. Runtime
-validation stopped at this compatibility blocker; no alternate runtime or
-workaround was introduced. JIT builds and execution of the original five examples, successful release
-startup/shutdown, and the packaged Ping Pong exchange and restart remain untested.
+The option remains unchanged in `examples/release/config/vm.args`. At that
+checkpoint, runtime validation stopped at this compatibility blocker; no alternate
+runtime or workaround was introduced. JIT builds and execution of the original five
+examples, successful release startup/shutdown, and the packaged Ping Pong exchange
+and restart remained untested.
 Compiling Cowboy and Gun does not establish a successful HTTP exchange.
 
 Separate focused checks of the plugin and NIF on 2026-10-26 passed on both Linux
@@ -104,7 +107,7 @@ Rebar3 was 3.27.0; the native build used CMake 4.2.3 and GCC 15.2.0.
 Both projects built from independent source copies. Plugin help and greeting
 passed in a separate consumer; NIF EUnit and execution from an extracted archive
 passed. Clean hooks and disposable-copy cleanup also passed. These checks did
-not retry or alter the release blocker above.
+not retry or alter the release blocker at that checkpoint.
 
 The current workflows pass Actionlint 1.7.7; Python syntax, workflow shell syntax,
 paths and whitespace have also been checked. These are structural checks only.
